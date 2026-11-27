@@ -162,10 +162,10 @@
           <button id="gymModeBtn" type="button" title="Switch between Commercial Gym and Home Gym workouts" class="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 rounded-lg text-[11px] font-mono font-semibold border border-hairline bg-card hover:border-amberK text-slate-100 transition-colors min-h-[36px]">
             🏢 Gym
           </button>
-          <div id="syncBadge" class="hidden xs:flex sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono border border-hairline bg-card text-slate-400 min-h-[36px]">
+          <button id="syncBadge" type="button" title="Cloud Sync Account (Firebase)" class="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-[11px] font-mono border border-hairline bg-card hover:border-emeraldK text-slate-300 transition-colors min-h-[36px] cursor-pointer">
             <span id="syncDot" class="w-2 h-2 rounded-full bg-amberK animate-pulse shrink-0"></span>
             <span id="syncText" class="whitespace-nowrap">Init...</span>
-          </div>
+          </button>
           <button id="unitBtn" type="button" class="px-2.5 sm:px-3 py-1.5 rounded-lg text-[11px] font-mono font-semibold border border-hairline bg-card hover:border-crimson text-slate-100 transition-colors min-h-[36px]">
             lbs / in
           </button>
@@ -255,12 +255,29 @@
     </div>
   </div>
 
+  <!-- Firebase Cloud Sync Sign-In / Account Modal -->
+  <div id="authModalWrap" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+    <div class="panel-card rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4 border border-hairline">
+      <div class="flex items-center justify-between gap-2 pb-2 border-b border-hairline">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg bg-emeraldK/15 text-emeraldK flex items-center justify-center font-mono font-bold text-sm">☁</div>
+          <div>
+            <h3 class="font-bold text-base text-slate-100">Firebase Cloud Sync</h3>
+            <p class="font-mono text-[10px] text-slate-400">PROJECT: kime-hub · REAL-TIME DESKTOP ↔ PHONE</p>
+          </div>
+        </div>
+        <button id="authCloseBtn" type="button" class="px-2.5 py-1.5 rounded-lg font-mono text-xs border border-hairline text-slate-400 hover:text-slate-100 min-h-[36px]">✕</button>
+      </div>
+      <div id="authModalBody" class="space-y-4"></div>
+    </div>
+  </div>
+
   <!-- ======================================================================
        DATA-DRIVEN APPLICATION ENGINE
        ====================================================================== -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
     /* ======================================================================
@@ -1729,8 +1746,20 @@
       }
     }));
 
-    let db = null, currentUser = null, saveTimer = null, localWritePending = false;
+    // Personal Firebase Spark Config (kime-hub)
+    const PERSONAL_FIREBASE_CONFIG = {
+      apiKey: "AIzaSyDedrbu7aZRizuzjmee5hy7evPcvxGKMac",
+      authDomain: "kime-hub.firebaseapp.com",
+      projectId: "kime-hub",
+      storageBucket: "kime-hub.firebasestorage.app",
+      messagingSenderId: "566860669649",
+      appId: "1:566860669649:web:f3e588513eb1949ffd1bf0"
+    };
+
+    let auth = null, db = null, currentUser = null, unsubSnapshot = null;
+    let saveTimer = null, localWritePending = false;
     let cloudConfigured = false, cloudHydrated = false, pendingCloudPush = false;
+    let lastCloudError = '';
     const clientTag = 'c_' + Math.random().toString(36).slice(2, 9);
 
     function setSyncUI(mode) {
@@ -1740,125 +1769,272 @@
       if (mode === 'cloud') {
         dot.className = 'w-2 h-2 rounded-full bg-emeraldK shrink-0';
         txt.className = 'text-emeraldK font-semibold whitespace-nowrap';
-        txt.textContent = 'Cloud Synced';
+        txt.textContent = 'Synced';
       } else if (mode === 'saving') {
         dot.className = 'w-2 h-2 rounded-full bg-amberK animate-pulse shrink-0';
         txt.className = 'text-amberK font-semibold whitespace-nowrap';
         txt.textContent = 'Saving...';
+      } else if (mode === 'signed_out') {
+        dot.className = 'w-2 h-2 rounded-full bg-amberK shrink-0';
+        txt.className = 'text-amberK font-semibold whitespace-nowrap';
+        txt.textContent = 'Sign In';
+      } else if (mode === 'error') {
+        dot.className = 'w-2 h-2 rounded-full bg-crimson shrink-0';
+        txt.className = 'text-crimson font-semibold whitespace-nowrap';
+        txt.textContent = 'Sync Err';
       } else {
         dot.className = 'w-2 h-2 rounded-full bg-skyK shrink-0';
         txt.className = 'text-skyK font-semibold whitespace-nowrap';
-        txt.textContent = 'Saved Locally';
+        txt.textContent = 'Local';
       }
     }
 
-    function saveState() {
+    function openAuthModal() {
+      const wrap = document.getElementById('authModalWrap');
+      if (!wrap) return;
+      renderAuthModalBody();
+      wrap.classList.remove('hidden');
+      wrap.classList.add('flex');
+    }
+
+    function closeAuthModal() {
+      const wrap = document.getElementById('authModalWrap');
+      if (!wrap) return;
+      wrap.classList.add('hidden');
+      wrap.classList.remove('flex');
+    }
+
+    function renderAuthModalBody(errMsg = '') {
+      const body = document.getElementById('authModalBody');
+      if (!body) return;
+      const errToShow = errMsg || lastCloudError;
+
+      if (currentUser) {
+        body.innerHTML = `
+          <div class="rounded-xl panel-sub p-3.5 space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-mono text-[10px] uppercase font-bold text-emeraldK">✓ Connected to Firestore</span>
+              <span class="font-mono text-[10px] text-slate-400">Spark Plan ($0)</span>
+            </div>
+            <div class="text-sm font-semibold text-slate-100 break-all">${esc(currentUser.email || currentUser.uid)}</div>
+            <p class="text-xs text-slate-400 leading-relaxed">Changes save locally immediately and sync in real time across every device signed into this account.</p>
+          </div>
+          ${errToShow ? `<div class="rounded-xl p-3 bg-crimson/10 border border-crimson/35 text-xs text-crimson leading-relaxed">${esc(errToShow)}</div>` : ''}
+          <div class="flex flex-wrap justify-between gap-2 pt-1">
+            <button id="authForceSyncBtn" type="button" class="px-4 py-2.5 rounded-xl font-mono text-xs font-bold bg-emeraldK/15 text-emeraldK border border-emeraldK/40 hover:bg-emeraldK hover:text-[#0d0f12] transition-colors min-h-[44px]">↻ Push Sync Now</button>
+            <button id="authSignOutBtn" type="button" class="px-4 py-2.5 rounded-xl font-mono text-xs font-bold bg-crimson/10 text-crimson border border-crimson/35 hover:bg-crimson hover:text-white transition-colors min-h-[44px]">Sign Out</button>
+          </div>`;
+
+        document.getElementById('authForceSyncBtn')?.addEventListener('click', () => {
+          lastCloudError = '';
+          saveState(true);
+          toast('Pushing latest local state to cloud...');
+        });
+        document.getElementById('authSignOutBtn')?.addEventListener('click', async () => {
+          if (!auth) return;
+          try {
+            await signOut(auth);
+            lastCloudError = '';
+            closeAuthModal();
+            toast('Signed out (local data kept safely on this device).');
+          } catch (e) {
+            renderAuthModalBody(e.message || 'Sign-out failed.');
+          }
+        });
+        return;
+      }
+
+      body.innerHTML = `
+        <p class="text-xs text-slate-300 leading-relaxed">Sign in once with your personal <strong>KIME Hub</strong> Firebase email and password. Both your desktop and phone will stay logged in automatically.</p>
+        <form id="authSignInForm" class="space-y-3">
+          <div>
+            <label for="authEmail" class="block font-mono text-[10px] uppercase text-slate-400 mb-1">Email</label>
+            <input id="authEmail" type="email" required autocomplete="email" placeholder="you@example.com"
+              class="w-full min-h-[44px] px-3 rounded-xl text-sm bg-[#0d0f12] border border-hairline text-slate-100 placeholder:text-slate-600" />
+          </div>
+          <div>
+            <label for="authPass" class="block font-mono text-[10px] uppercase text-slate-400 mb-1">Password</label>
+            <input id="authPass" type="password" required autocomplete="current-password" placeholder="••••••••"
+              class="w-full min-h-[44px] px-3 rounded-xl text-sm bg-[#0d0f12] border border-hairline text-slate-100 placeholder:text-slate-600" />
+          </div>
+          ${errToShow ? `<div class="rounded-xl p-3 bg-crimson/10 border border-crimson/35 text-xs text-crimson leading-relaxed">${esc(errToShow)}</div>` : ''}
+          <div class="flex justify-end gap-2 pt-1">
+            <button id="authCancelBtn" type="button" class="px-4 py-2.5 rounded-xl text-xs font-mono font-semibold border border-hairline hover:bg-white/5 text-slate-300 min-h-[44px]">Stay Local</button>
+            <button id="authSubmitBtn" type="submit" class="px-5 py-2.5 rounded-xl text-xs font-mono font-bold bg-crimson text-white hover:opacity-90 min-h-[44px] shadow-lg shadow-crimson/25">Sign In &amp; Sync</button>
+          </div>
+        </form>`;
+
+      document.getElementById('authCancelBtn')?.addEventListener('click', closeAuthModal);
+      document.getElementById('authSignInForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!auth) { renderAuthModalBody('Firebase failed to initialize on this page.'); return; }
+        const email = document.getElementById('authEmail')?.value.trim();
+        const pass = document.getElementById('authPass')?.value || '';
+        const btn = document.getElementById('authSubmitBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Signing in...'; }
+        try {
+          lastCloudError = '';
+          await signInWithEmailAndPassword(auth, email, pass);
+          closeAuthModal();
+          toast('Signed in! Syncing with your KIME Hub cloud...');
+        } catch (err) {
+          const code = err?.code || '';
+          let msg = 'Sign-in failed. Check your email and password.';
+          if (code.includes('invalid-credential') || code.includes('wrong-password') || code.includes('user-not-found')) {
+            msg = 'Incorrect email or password. Use the exact user you created in Firebase Authentication → Users.';
+          } else if (code.includes('too-many-requests')) {
+            msg = 'Too many attempts—wait a minute and try again.';
+          } else if (code.includes('network-request-failed')) {
+            msg = 'Network offline—reconnect to sign in.';
+          }
+          renderAuthModalBody(msg);
+        }
+      });
+    }
+
+    function saveState(forceImmediate = false) {
       state.updatedAt = Date.now();
       // Mirror to localStorage immediately for instant offline durability
       try { window.localStorage.setItem(LOCAL_KEY, JSON.stringify(state)); } catch (_) {}
 
       // Wait for initial cloud snapshot before writing so we never race-overwrite existing cloud data
-      if (cloudConfigured && !cloudHydrated) {
+      if (cloudConfigured && currentUser && !cloudHydrated) {
         pendingCloudPush = true;
         setSyncUI('saving');
         return;
       }
-      if (!db || !currentUser) { setSyncUI('local'); return; }
+      if (!db || !currentUser) {
+        setSyncUI(cloudConfigured ? 'signed_out' : 'local');
+        return;
+      }
 
       localWritePending = true;
       setSyncUI('saving');
       clearTimeout(saveTimer);
-      saveTimer = setTimeout(async () => {
+      const runPush = async () => {
         if (!db || !currentUser) return;
         try {
-          const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-          const ref = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'kime_hub', 'state');
+          // Matches your Firestore Security Rule: match /users/{userId}/{document=**}
+          const ref = doc(db, 'users', currentUser.uid, 'kime_hub', 'state');
           await setDoc(ref, { payload: JSON.stringify(state), updatedAt: state.updatedAt, clientTag });
           localWritePending = false;
           pendingCloudPush = false;
+          lastCloudError = '';
           setSyncUI('cloud');
         } catch (err) {
           console.error('Cloud save error:', err);
-          setSyncUI('local');
+          localWritePending = false;
+          if (err?.code === 'permission-denied') {
+            lastCloudError = 'Firestore Permission Denied: Check that the email in your Firestore Rules exactly matches your login email (all lowercase).';
+            setSyncUI('error');
+            toast('Firestore Rules blocked write—tap Sync Err in header.', true);
+          } else {
+            setSyncUI('local');
+          }
         }
-      }, 320);
+      };
+      if (forceImmediate) runPush();
+      else saveTimer = setTimeout(runPush, 320);
+    }
+
+    function attachUserSnapshot(user) {
+      if (unsubSnapshot) { try { unsubSnapshot(); } catch (_) {} unsubSnapshot = null; }
+      cloudHydrated = false;
+      setSyncUI('saving');
+
+      const ref = doc(db, 'users', user.uid, 'kime_hub', 'state');
+      unsubSnapshot = onSnapshot(
+        ref,
+        (snap) => {
+          cloudHydrated = true;
+          lastCloudError = '';
+
+          if (snap.exists()) {
+            const data = snap.data();
+            if (data && data.clientTag === clientTag && localWritePending) return;
+            if (data && data.payload) {
+              try {
+                const remote = hydrate(JSON.parse(data.payload));
+                const remoteMigrated = !!remote._needsMigrationSave;
+                delete remote._needsMigrationSave;
+
+                const localHas = hasUserData(state);
+                const remoteHas = hasUserData(remote);
+
+                // Safety guard: NEVER let an empty device overwrite real cloud data
+                const shouldAdoptRemote =
+                  (!localHas && remoteHas) ||
+                  (remoteHas && (remote.updatedAt || 0) > (state.updatedAt || 0)) ||
+                  (!localHas && !remoteHas && (remote.updatedAt || 0) >= (state.updatedAt || 0));
+
+                if (shouldAdoptRemote) {
+                  state = remote;
+                  pendingCloudPush = false;
+                  try { window.localStorage.setItem(LOCAL_KEY, JSON.stringify(state)); } catch (_) {}
+                  if (remoteMigrated) saveState();
+                  syncUnitUI();
+                  syncGymModeUI();
+                  // Avoid interrupting an active 0.25x tap-along recording mid-session
+                  if (typeof CAD !== 'undefined' && CAD.recording) {
+                    toast('Cloud data synced in background.');
+                  } else {
+                    goTab(state.activeTab || 'overview', false);
+                  }
+                } else if (pendingCloudPush || (localHas && !remoteHas) || (localHas && (state.updatedAt || 0) > (remote.updatedAt || 0))) {
+                  saveState(true);
+                }
+                setSyncUI('cloud');
+              } catch (e) { console.error(e); }
+            }
+          } else {
+            // Cloud document doesn't exist yet: push local data if present, otherwise mark ready
+            if (hasUserData(state) || pendingCloudPush) saveState(true);
+            else setSyncUI('cloud');
+          }
+        },
+        (err) => {
+          console.error('Snapshot error:', err);
+          cloudHydrated = true;
+          if (err?.code === 'permission-denied') {
+            lastCloudError = 'Firestore Permission Denied: Make sure the email in your Firebase Firestore Rules matches your signed-in email exactly (all lowercase).';
+            setSyncUI('error');
+            toast('Sync blocked by Firestore Rules—tap Sync Err to inspect.', true);
+          } else {
+            setSyncUI('local');
+          }
+        }
+      );
     }
 
     async function initCloud() {
       try {
-        if (typeof __firebase_config === 'undefined' || !__firebase_config) {
+        if (!PERSONAL_FIREBASE_CONFIG?.apiKey || !PERSONAL_FIREBASE_CONFIG?.projectId) {
           cloudConfigured = false;
           cloudHydrated = true;
           setSyncUI('local');
           return;
         }
         cloudConfigured = true;
-        const cfg = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
-        const app = initializeApp(cfg);
-        const auth = getAuth(app);
+        const app = initializeApp(PERSONAL_FIREBASE_CONFIG);
+        auth = getAuth(app);
         db = getFirestore(app);
 
-        // RULE 3: Authenticate FIRST and await
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-        currentUser = auth.currentUser;
-        if (!currentUser) { cloudHydrated = true; setSyncUI('local'); return; }
+        try { await setPersistence(auth, browserLocalPersistence); } catch (_) {}
 
-        // RULE 1: Strict private user path
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const ref = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'kime_hub', 'state');
-
-        onSnapshot(
-          ref,
-          (snap) => {
-            const firstSync = !cloudHydrated;
-            cloudHydrated = true;
-
-            if (snap.exists()) {
-              const data = snap.data();
-              if (data && data.clientTag === clientTag && localWritePending) return;
-              if (data && data.payload) {
-                try {
-                  const remote = hydrate(JSON.parse(data.payload));
-                  const remoteMigrated = !!remote._needsMigrationSave;
-                  delete remote._needsMigrationSave;
-
-                  const localHas = hasUserData(state);
-                  const remoteHas = hasUserData(remote);
-
-                  // Safety guard: NEVER let an empty local state overwrite real cloud data
-                  const shouldAdoptRemote =
-                    (!localHas && remoteHas) ||
-                    (remoteHas && (remote.updatedAt || 0) >= (state.updatedAt || 0)) ||
-                    (!localHas && !remoteHas && (remote.updatedAt || 0) >= (state.updatedAt || 0));
-
-                  if (shouldAdoptRemote) {
-                    state = remote;
-                    pendingCloudPush = false;
-                    try { window.localStorage.setItem(LOCAL_KEY, JSON.stringify(state)); } catch (_) {}
-                    if (remoteMigrated) saveState();
-                    syncUnitUI();
-                    syncGymModeUI();
-                    goTab(state.activeTab || 'overview', false);
-                  } else if (pendingCloudPush || (localHas && !remoteHas) || (localHas && (state.updatedAt || 0) > (remote.updatedAt || 0))) {
-                    saveState();
-                  }
-                  setSyncUI('cloud');
-                } catch (e) { console.error(e); }
-              }
-            } else {
-              // Cloud doc does not exist yet: only write if user has real data or an unsaved local edit
-              if (hasUserData(state) || pendingCloudPush) saveState();
-              else setSyncUI('cloud');
-            }
-          },
-          (err) => { console.error('Snapshot error:', err); cloudHydrated = true; setSyncUI('local'); }
-        );
+        onAuthStateChanged(auth, (user) => {
+          currentUser = user || null;
+          if (currentUser) {
+            attachUserSnapshot(currentUser);
+          } else {
+            if (unsubSnapshot) { try { unsubSnapshot(); } catch (_) {} unsubSnapshot = null; }
+            cloudHydrated = false;
+            pendingCloudPush = false;
+            setSyncUI('signed_out');
+          }
+        });
       } catch (e) {
         console.error('Firebase init fallback:', e);
+        cloudConfigured = false;
         cloudHydrated = true;
         setSyncUI('local');
       }
@@ -3331,8 +3507,9 @@
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div class="panel-card rounded-2xl p-5 space-y-3">
             <h3 class="font-semibold text-base text-slate-100">Data Safety &amp; JSON Backup</h3>
-            <p class="text-xs text-slate-400 leading-relaxed">Your progress auto-syncs to cloud storage inside Gemini and mirrors locally when hosted standalone. Download periodic JSON snapshots for 100% safety.</p>
+            <p class="text-xs text-slate-400 leading-relaxed">Sign in with your personal Firebase account for automatic real-time desktop ↔ phone sync (with instant offline local mirror). Download periodic JSON snapshots for 100% safety.</p>
             <div class="flex flex-wrap gap-2 pt-1">
+              <button id="labCloudBtn" type="button" class="px-3.5 py-2.5 rounded-xl font-mono text-xs font-semibold bg-emeraldK/15 border border-emeraldK/40 hover:bg-emeraldK hover:text-[#0d0f12] text-emeraldK transition-colors min-h-[44px]">☁ Cloud Sync Account</button>
               <button id="dlJson" type="button" class="px-3.5 py-2.5 rounded-xl font-mono text-xs font-semibold bg-cardSub border border-hairline hover:border-skyK text-skyK min-h-[44px]">⬇ Download JSON Backup</button>
               <label class="px-3.5 py-2.5 rounded-xl font-mono text-xs font-semibold bg-cardSub border border-hairline hover:border-emeraldK text-emeraldK cursor-pointer flex items-center min-h-[44px]">
                 ⬆ Import JSON Backup
@@ -3388,6 +3565,7 @@
       document.getElementById('copyRepBtn')?.addEventListener('click', () => {
         copyText(buildGeminiReport(), 'Complete Month-1 Report copied! Paste into Gemini.');
       });
+      document.getElementById('labCloudBtn')?.addEventListener('click', openAuthModal);
       document.getElementById('dlJson')?.addEventListener('click', () => {
         const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
@@ -5741,6 +5919,11 @@
     }
 
     document.getElementById('unitBtn')?.addEventListener('click', toggleUnits);
+    document.getElementById('syncBadge')?.addEventListener('click', openAuthModal);
+    document.getElementById('authCloseBtn')?.addEventListener('click', closeAuthModal);
+    document.getElementById('authModalWrap')?.addEventListener('click', (e) => {
+      if (e.target.id === 'authModalWrap') closeAuthModal();
+    });
     document.getElementById('gymModeBtn')?.addEventListener('click', () => setGymMode(state.gymMode === 'home' ? 'gym' : 'home'));
     document.getElementById('hdrMatBtn')?.addEventListener('click', () => openMatMode({ type: 'day', day: state.selDay || 1 }));
     document.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => goTab(b.dataset.tab)));
